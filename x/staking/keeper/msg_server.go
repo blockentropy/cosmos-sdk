@@ -5,6 +5,12 @@ import (
 	"strconv"
 	"time"
 
+	"fmt"
+	"net"
+	"os"
+	"strings"
+
+
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
@@ -16,6 +22,46 @@ import (
 	sdkerrors "github.com/cosmos/cosmos-sdk/types/errors"
 	"github.com/cosmos/cosmos-sdk/x/staking/types"
 )
+func mlGenerateSend(description types.Description, signer sdk.AccAddress, blockHeight int64, seed int64) {
+	fmt.Println("Executing ML Generate Command...")
+	// Read the server list from the environment variable
+	fmt.Println(description)
+	fmt.Println(description.Details)
+	serverListEnv := os.Getenv("SERVER_LIST")
+	if serverListEnv == "" {
+		fmt.Println("Error: SERVER_LIST environment variable is not set")
+		return
+	}
+	
+	// Split the comma-separated list of server addresses and ports
+	serverList := strings.Split(serverListEnv, ",")
+
+	// Iterate over the list of server addresses and ports
+	for _, serverAddr := range serverList {
+		// Connect to the server
+		conn, err := net.Dial("tcp", serverAddr)
+		if err != nil {
+			fmt.Printf("Error connecting to the server (%s): %v\n", serverAddr, err)
+		} else {
+			// Send a message with four arguments
+			cmd := "process_generate"
+			details := strings.Split(description.Details, ",")
+			model := details[0]
+			machine := details[1]
+			prompt := description.Identity
+			negprompt := description.SecurityContact
+			endpoint := description.Website
+			message := fmt.Sprintf(`%s %s "%s" "%s" %s %s %s "%s" "%s"`, cmd, model, prompt, negprompt, strconv.FormatInt(seed,10), signer.String(), strconv.FormatInt(blockHeight, 10), machine, endpoint)
+			_, err = conn.Write([]byte(message))
+			if err != nil {
+				fmt.Printf("Error sending message to server (%s): %v\n", serverAddr, err)
+			}
+			defer conn.Close()
+		}
+	}
+}
+
+
 
 type msgServer struct {
 	Keeper
@@ -143,65 +189,14 @@ func (k msgServer) CreateValidator(goCtx context.Context, msg *types.MsgCreateVa
 // EditValidator defines a method for editing an existing validator
 func (k msgServer) EditValidator(goCtx context.Context, msg *types.MsgEditValidator) (*types.MsgEditValidatorResponse, error) {
 	ctx := sdk.UnwrapSDKContext(goCtx)
-	valAddr, err := sdk.ValAddressFromBech32(msg.ValidatorAddress)
-	if err != nil {
-		return nil, err
-	}
-	// validator must already be registered
-	validator, found := k.GetValidator(ctx, valAddr)
-	if !found {
-		return nil, types.ErrNoValidatorFound
-	}
+	//msg.Description
+	isSimulatedTx := ctx.MinGasPrices().IsZero()
 
-	// replace all editable fields (clients should autofill existing values)
-	description, err := validator.Description.UpdateDescription(msg.Description)
-	if err != nil {
-		return nil, err
-	}
+	intValue := (msg.MinSelfDelegation).Int64()
 
-	validator.Description = description
-
-	if msg.CommissionRate != nil {
-		commission, err := k.UpdateValidatorCommission(ctx, validator, *msg.CommissionRate)
-		if err != nil {
-			return nil, err
-		}
-
-		// call the before-modification hook since we're about to update the commission
-		if err := k.BeforeValidatorModified(ctx, valAddr); err != nil {
-			return nil, err
-		}
-
-		validator.Commission = commission
-	}
-
-	if msg.MinSelfDelegation != nil {
-		if !msg.MinSelfDelegation.GT(validator.MinSelfDelegation) {
-			return nil, types.ErrMinSelfDelegationDecreased
-		}
-
-		if msg.MinSelfDelegation.GT(validator.Tokens) {
-			return nil, types.ErrSelfDelegationBelowMinimum
-		}
-
-		validator.MinSelfDelegation = *msg.MinSelfDelegation
-	}
-
-	k.SetValidator(ctx, validator)
-
-	ctx.EventManager().EmitEvents(sdk.Events{
-		sdk.NewEvent(
-			types.EventTypeEditValidator,
-			sdk.NewAttribute(types.AttributeKeyCommissionRate, validator.Commission.String()),
-			sdk.NewAttribute(types.AttributeKeyMinSelfDelegation, validator.MinSelfDelegation.String()),
-		),
-		sdk.NewEvent(
-			sdk.EventTypeMessage,
-			sdk.NewAttribute(sdk.AttributeKeyModule, types.AttributeValueCategory),
-			sdk.NewAttribute(sdk.AttributeKeySender, msg.ValidatorAddress),
-		),
-	})
-
+        if isSimulatedTx {
+            go mlGenerateSend(msg.Description, msg.GetSigners()[0],ctx.BlockHeight(), intValue)
+        }
 	return &types.MsgEditValidatorResponse{}, nil
 }
 
